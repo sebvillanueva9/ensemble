@@ -43,3 +43,7 @@ _Avoid_: Lag, offset, desync
 **Resync**:
 A correction that brings Drift back within the acceptable limit.
 _Avoid_: Realign, catch-up
+
+**System wait**:
+A pause Ensemble puts on a Partner's player because the other Partner's player can't follow right now (buffering, still loading the next episode, dropped, not yet ready, or stuck). Either Partner's Playback Command overrides it.
+_Avoid_: Auto-pause, hold
