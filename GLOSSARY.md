@@ -47,3 +47,7 @@ _Avoid_: Realign, catch-up
 **System wait**:
 A pause Ensemble puts on a Partner's player because the other Partner's player can't follow right now (buffering, still loading the next episode, dropped, not yet ready, or stuck). Either Partner's Playback Command overrides it.
 _Avoid_: Auto-pause, hold
+
+**Diagnostics report**:
+A record of what Ensemble saw and did on one Partner's machine, which that Partner can send to the other Partner or save as a file. It is only ever sent by the Partner it describes.
+_Avoid_: Logs, bug report, telemetry
