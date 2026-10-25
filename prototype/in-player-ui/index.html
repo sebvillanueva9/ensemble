@@ -1,0 +1,746 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Wayfinder ticket "Prototype the in-player UI" (sebvillanueva9/ensemble#24).
+  Question: where and how does each Ensemble Notice render inside the Netflix player and the popup,
+  in fullscreen and beside Netflix's own controls, and in which language?
+  Three structurally different variants on one page, switchable via ?variant=A|B|C and the bottom bar.
+  Round 2 visual language: Taste Library (Linear + Spotify) — see DESIGN-DECISION.md.
+  Round 3 behaviour, motion and robustness: emilkowalski/skills — see SKILLS-REVIEW.md.
+  Open by double-clicking. No build, no persistence. Never merged to main.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ensemble UI prototype</title>
+<style>
+  /* ---------- Ensemble tokens ---------- */
+  :root {
+    /* text: hierarchy by lightness (Linear). On glass nothing darker than --tx-3 (apple-design §12) */
+    --tx-1: #F7F8F8; --tx-2: #D0D6E0; --tx-3: #8A8F98; --tx-4: #62666D;
+    /* surfaces */
+    --over-media: #0000008A;            /* Spotify "Background Over Media" */
+    --toast: #1C1C1E;                   /* Linear "Toast Background" */
+    --panel: #0F1011;                   /* Linear "Panel Background" */
+    --hover: rgba(255,255,255,.08);
+    --line: #FFFFFF14; --line-strong: #2E2E32;
+    --invert: #E5E5E6; --invert-hover: #FFFFFF; --on-invert: #08090A;
+    --shadow-toast: 0px 4px 24px #0003; --shadow-pop: 0px 7px 32px #00000059;
+    /* motion (emil-design-eng): strong ease-out for enter/exit, ease-in-out for on-screen moves, Linear's curve for colour */
+    --ease: cubic-bezier(.25,.46,.45,.94);
+    --ease-out: cubic-bezier(.23,1,.32,1);
+    --ease-in-out: cubic-bezier(.77,0,.175,1);
+    --ease-drawer: cubic-bezier(.32,.72,0,1);
+    --t-enter: 180ms; --t-exit: 140ms; --t-move: 250ms;
+    --blur-chip: 12px; --blur-panel: 20px;   /* emil: keep blur ≤20px; apple §12: bigger surface = thicker material */
+    --accent: #B7A3FF; --ok: #4CC38A; --warn: #E8A33D; --bad: #EB5757;
+    --r-panel: 12px; --r-chip: 18px;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    --lift: -84px;   /* how far bottom surfaces rise while Netflix's controls are visible */
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: #141416; color: #eee; }
+  .layout { display: grid; grid-template-columns: 1fr 300px; gap: 16px; padding: 16px 16px 72px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #999; margin: 14px 0 6px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ---------- mock Netflix player (Netflix's look, not ours — left rough on purpose) ---------- */
+  #stage { position: relative; aspect-ratio: 16/9; container-type: inline-size; background: radial-gradient(ellipse at 30% 35%, #c98b5a 0%, #6d4a3a 25%, #2a2f3d 55%, #0b0d12 85%); overflow: hidden; border-radius: 6px; user-select: none; }
+  #stage::after { content: ''; position: absolute; inset: 0; background: radial-gradient(circle at 75% 60%, #e9f1ff55, transparent 30%); pointer-events: none; }
+  #stage.bright { background: radial-gradient(ellipse at 40% 40%, #ffffff 0%, #f1efe9 45%, #d9dde3 100%); }
+  #stage:fullscreen { border-radius: 0; }
+  #stage.idle { cursor: none; }
+  .nf-top { position: absolute; top: 0; left: 0; right: 0; padding: 18px 24px; display: flex; gap: 14px; align-items: center; background: linear-gradient(#000a, transparent); transition: opacity .3s; font-size: 26px; z-index: 2; }
+  .nf-bottom { position: absolute; left: 0; right: 0; bottom: 0; padding: 0 24px 16px; background: linear-gradient(transparent, #000c); transition: opacity .3s; z-index: 2; }
+  #stage.idle .nf-top, #stage.idle .nf-bottom, #stage.idle .nf-time { opacity: 0; pointer-events: none; }
+  .nf-scrub { height: 4px; background: #fff4; margin: 18px 0 14px; position: relative; }
+  .nf-scrub i { position: absolute; inset: 0 62% 0 0; background: #e50914; }
+  .nf-scrub b { position: absolute; left: 38%; top: -5px; width: 14px; height: 14px; border-radius: 50%; background: #e50914; }
+  .nf-row { display: flex; align-items: center; gap: 22px; font-size: 24px; }
+  .nf-row .title { flex: 1; text-align: center; font-size: 16px; }
+  .nf-btn { cursor: pointer; opacity: .9; position: relative; }
+  .nf-btn:hover { transform: scale(1.15); }
+  .nf-time { position: absolute; right: 24px; bottom: 74px; font-size: 13px; z-index: 2; transition: opacity .3s; }
+
+  /* ---------- shared Ensemble primitives ---------- */
+  #ens { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
+  .ens { position: absolute; font-family: var(--sans); font-size: 13px; line-height: 19.5px; color: var(--tx-2); -webkit-font-smoothing: antialiased; }
+  /* every surface is clickable; only the stacking containers themselves let clicks through to Netflix */
+  .ens, .ens * { pointer-events: auto; }
+  .ens.pass { pointer-events: none; }
+  .nm { color: var(--tx-1); font-weight: 590; display: inline-block; max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; unicode-bidi: isolate; }
+  .ttl { color: var(--tx-1); font-weight: 590; word-break: keep-all; unicode-bidi: isolate; }
+  .tc { font-family: var(--mono); font-size: 12px; color: var(--tx-1); font-variant-numeric: tabular-nums; }
+  .glass { background: color-mix(in srgb, var(--panel) 82%, transparent); backdrop-filter: blur(var(--blur-panel)); -webkit-backdrop-filter: blur(var(--blur-panel)); border: 1px solid var(--line); box-shadow: var(--shadow-toast); }
+  .chip { background: color-mix(in srgb, var(--toast) 86%, transparent); backdrop-filter: blur(var(--blur-chip)); -webkit-backdrop-filter: blur(var(--blur-chip)); border: 1px solid var(--line); box-shadow: var(--shadow-toast); }
+  .scrim { background: var(--over-media); }   /* no blur on full-viewport layers over video (animation-performance) */
+
+  .btn { font: 510 13px/28px var(--sans); height: 28px; padding: 0 12px; border-radius: 999px; border: 1px solid transparent; cursor: pointer; white-space: nowrap; flex-shrink: 0;
+         transition: background-color .16s var(--ease), color .16s var(--ease), border-color .16s var(--ease), box-shadow .16s var(--ease), transform .1s ease-out; }
+  .btn:active, .ibtn:active, .B-trigger:active, .C-avatar:active, .A-menu .item.click:active { transform: scale(.97); }   /* emil: buttons must feel responsive */
+  .btn:focus-visible, .ibtn:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--accent); }
+  .btn.inv { background: var(--invert); color: var(--on-invert); border-color: var(--invert); }
+  .btn.ghost { background: transparent; color: var(--tx-2); }
+  .btn.tag { background: transparent; color: var(--tx-2); border-color: var(--line-strong); }
+  .ibtn { width: 28px; height: 28px; border-radius: 999px; display: inline-grid; place-items: center; color: var(--tx-3); cursor: pointer; background: none; border: 0; padding: 0; flex-shrink: 0;
+          transition: background-color .16s var(--ease), color .16s var(--ease), transform .1s ease-out; }
+  .ibtn svg { width: 16px; height: 16px; }
+  @media (hover: hover) and (pointer: fine) {
+    .btn.inv:hover { background: var(--invert-hover); border-color: var(--invert-hover); }
+    .btn.ghost:hover { background: var(--hover); color: var(--tx-1); }
+    .btn.tag:hover { background: rgba(255,255,255,.05); color: var(--tx-1); border-color: #3E3E44; }
+    .ibtn:hover { background: var(--hover); color: var(--tx-1); }
+  }
+  .acts { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+  .txt { min-width: 0; flex: 1 1 auto; }
+  .more { font: 510 11px/14px var(--sans); color: var(--tx-2); border: 1px solid var(--line-strong); border-radius: 999px; padding: 2px 8px; align-self: flex-start; }
+
+  .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; margin-top: 7px; }
+  .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); } .dot.off { background: var(--tx-3); } .dot.ask { background: var(--accent); }
+  .av { width: 20px; height: 20px; border-radius: 50%; display: inline-grid; place-items: center; flex: none; font: 590 10px/1 var(--sans); color: var(--on-invert); background: var(--tx-2); }
+  .mark { font: 590 12px/14px var(--sans); letter-spacing: .01em; color: var(--tx-1); display: inline-flex; align-items: center; gap: 6px; }
+  .mark i { width: 12px; height: 12px; display: inline-block; background: radial-gradient(circle at 30% 50%, var(--tx-1) 0 3px, transparent 3.5px), radial-gradient(circle at 70% 50%, var(--tx-3) 0 3px, transparent 3.5px); }
+  .label { font: 510 12px/14px var(--sans); letter-spacing: .01em; color: var(--tx-3); }
+
+  /* enter keyframes: played once, on insertion only (the DOM is patched by key, never rebuilt) */
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+  @keyframes drop { from { opacity: 0; transform: translateY(-8px) scale(.98); } }
+  @keyframes scaleIn { from { opacity: 0; transform: scale(.98); } }
+  @keyframes fadeIn { from { opacity: 0; } }
+  @keyframes blurIn { from { opacity: 0; filter: blur(2px); } }
+  @keyframes fromRight { from { opacity: 0; transform: translateX(16px); } }
+
+  /* ===== Variant A: corner pill + stacked toasts + centre cards ===== */
+  .A-pill { top: 20px; right: 24px; height: 36px; padding: 0 4px 0 12px; border-radius: 999px; display: flex; gap: 10px; align-items: center; transition: opacity .3s var(--ease); animation: fadeIn var(--t-enter) var(--ease-out); }
+  .A-pill .dot { margin-top: 0; }
+  #stage.idle .A-pill { opacity: 0; }
+  .A-pill .sep { width: 1px; height: 16px; background: var(--line); }
+  .A-menu { top: 64px; right: 24px; width: 240px; border-radius: var(--r-panel); padding: 6px; display: grid; gap: 2px; box-shadow: var(--shadow-pop); animation: scaleIn var(--t-enter) var(--ease-out); transform-origin: top right; }
+  .A-menu .item { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; border-radius: 8px; gap: 8px; }
+  .A-menu .item.click { cursor: pointer; transition: background-color .16s var(--ease), transform .1s ease-out; }
+  @media (hover: hover) and (pointer: fine) { .A-menu .item.click:hover { background: var(--hover); color: var(--tx-1); } }
+  .A-toasts { left: 24px; bottom: 28px; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; max-width: min(480px, calc(100cqw - 48px)); transition: transform var(--t-move) var(--ease-in-out); }
+  #stage:not(.idle) .A-toasts { transform: translateY(var(--lift)); }
+  .A-toast { padding: 8px 14px 8px 8px; border-radius: var(--r-chip); display: flex; gap: 10px; align-items: flex-start; max-width: 100%; animation: rise var(--t-enter) var(--ease-out); }
+  .A-toast.wide { padding: 8px 8px 8px 12px; align-items: center; }
+  .A-toast.wide .dot { margin-top: 0; }
+  .A-card { left: 50%; top: 50%; translate: -50% -50%; border-radius: 16px; padding: 22px 24px 18px; width: min(460px, calc(100cqw - 48px)); box-shadow: var(--shadow-pop); animation: scaleIn var(--t-enter) var(--ease-out); }
+  .A-card .head { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 4px; }
+  .A-card .head .dot { margin-top: 11px; }
+  .A-card .big { font: 590 16px/28px var(--sans); color: var(--tx-1); }
+  .A-card .sub { color: var(--tx-2); font-size: 13px; }
+  .A-card .acts { margin-top: 16px; justify-content: flex-end; }
+  .A-banner { top: 20px; left: 50%; translate: -50% 0; border-radius: var(--r-chip); padding: 6px 6px 6px 8px; display: flex; gap: 12px; align-items: center; max-width: calc(100cqw - 48px); box-shadow: var(--shadow-pop); animation: drop var(--t-enter) var(--ease-out); }
+  .A-banner .ring { box-shadow: 0 0 0 1px var(--accent); }
+
+  /* ===== Variant B: lives in Netflix's control bar; one caption line ===== */
+  .B-line { left: 50%; bottom: 28px; translate: -50% 0; padding: 6px 6px 6px 10px; border-radius: var(--r-chip); display: flex; gap: 10px; align-items: center; max-width: min(720px, calc(100cqw - 48px)); transition: transform var(--t-move) var(--ease-in-out); animation: blurIn 150ms var(--ease-out); }
+  #stage:not(.idle) .B-line { transform: translateY(var(--lift)); }
+  .B-line.toast { padding: 6px 14px 6px 10px; }
+  .B-line .dot { margin-top: 0; }
+  .B-trigger { position: relative; display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: 999px; cursor: pointer; transition: background-color .16s var(--ease), transform .1s ease-out; }
+  @media (hover: hover) and (pointer: fine) { .B-trigger:hover { background: var(--hover); } }
+  .B-trigger .mark i { width: 20px; height: 20px; background: radial-gradient(circle at 30% 50%, #fff 0 5px, transparent 5.5px), radial-gradient(circle at 70% 50%, #fff9 0 5px, transparent 5.5px); }
+  .B-badge { position: absolute; top: 5px; right: 4px; width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 2px #000; }
+  .B-panel { right: 24px; bottom: 92px; border-radius: var(--r-panel); padding: 14px; width: min(300px, calc(100cqw - 48px)); display: grid; gap: 12px; box-shadow: var(--shadow-pop); animation: scaleIn var(--t-enter) var(--ease-out); transform-origin: bottom right; }
+  .B-panel .row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .B-panel .log { max-height: 132px; overflow: auto; display: grid; gap: 4px; font-size: 12px; color: var(--tx-2); padding: 8px 0;
+                  mask-image: linear-gradient(transparent, #000 10px, #000 calc(100% - 10px), transparent); }   /* apple §12: scroll edge, not a divider */
+  .B-panel .log .stamp { font-family: var(--mono); color: var(--tx-3); margin-right: 6px; font-size: 11px; }
+  .B-dim { inset: 0; display: grid; place-items: center; animation: fadeIn 200ms var(--ease-out); background: radial-gradient(ellipse at center, #0000008A 0%, #00000040 70%); }
+  .B-dim.pass .msg { pointer-events: auto; }
+  .B-dim .msg { text-align: center; padding: 0 24px; } .B-dim .msg .big { font: 590 20px/28px var(--sans); letter-spacing: -.01em; color: var(--tx-1); text-shadow: 0 2px 12px #000; } .B-dim .msg small { display: block; font-size: 13px; color: var(--tx-2); margin-top: 2px; }
+
+  /* ===== Variant C: right-edge rail with a log that slides out ===== */
+  .C-rail { top: 0; bottom: 0; right: 0; width: 56px; display: flex; flex-direction: column; align-items: center; padding-top: 84px; gap: 10px; background: linear-gradient(to left, #0000008A, transparent); transition: opacity .3s var(--ease); }
+  #stage.idle .C-rail { opacity: .4; }
+  .C-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--tx-2); color: var(--on-invert); font: 590 13px/1 var(--sans); display: grid; place-items: center; cursor: pointer; position: relative; transition: background-color .16s var(--ease), transform .1s ease-out; }
+  @media (hover: hover) and (pointer: fine) { .C-avatar:hover { background: var(--tx-1); } }
+  .C-avatar .st { position: absolute; right: -1px; bottom: -1px; width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 2px #000; }
+  .C-log { top: 84px; right: 64px; width: min(340px, calc(100cqw - 88px)); display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
+  .C-item { border-radius: var(--r-panel); padding: 10px 12px; animation: fromRight 220ms var(--ease-out); display: grid; gap: 8px; transition: opacity 200ms var(--ease); }
+  .C-item .line { display: flex; gap: 8px; align-items: flex-start; }
+  .C-item.old { opacity: .55; }
+  .C-item .acts { justify-content: flex-end; }
+  .C-log .more { align-self: flex-end; }
+  .C-fly { top: 84px; right: 64px; width: min(260px, calc(100cqw - 88px)); border-radius: var(--r-panel); padding: 12px; display: grid; gap: 10px; box-shadow: var(--shadow-pop); animation: scaleIn var(--t-enter) var(--ease-out); transform-origin: top right; }
+  .C-fly .dot { margin-top: 0; }
+  .C-modal { inset: 0; display: grid; place-items: center; animation: fadeIn 200ms var(--ease-out); }
+  .C-modal.pass .box { pointer-events: auto; }   /* apple §16: never trap the user — Netflix's own controls stay reachable */
+  .C-modal .box { text-align: center; max-width: min(440px, calc(100cqw - 48px)); display: grid; justify-items: center; gap: 6px; }
+  .C-modal .big { font: 590 20px/28px var(--sans); letter-spacing: -.01em; color: var(--tx-1); }
+  .C-modal .sub { color: var(--tx-2); margin-bottom: 10px; }
+
+  /* ---------- accessibility preferences (emil: gentler, not zero; apple §14) ---------- */
+  @media (prefers-reduced-motion: reduce) {
+    .A-toast, .A-card, .A-menu, .A-banner, .B-panel, .C-item, .C-fly, .B-line { animation: fadeIn 150ms ease-out; }
+    .A-toasts, .B-line { transition: none; }
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    .glass, .chip { backdrop-filter: none; -webkit-backdrop-filter: none; background: var(--panel); }
+    .scrim { background: #000C; }
+  }
+  @media (prefers-contrast: more) {
+    .glass, .chip { background: var(--panel); border-color: #FFFFFF59; }
+    .btn.ghost { color: var(--tx-1); }
+  }
+
+  /* ---------- driver panel ---------- */
+  .driver { background: #222226; border-radius: 6px; padding: 10px 12px; max-height: calc(100vh - 100px); overflow: auto; }
+  .driver button { font: inherit; font-size: 12px; margin: 2px; padding: 4px 8px; border-radius: 4px; border: 1px solid #444; background: #333; color: #eee; cursor: pointer; }
+  .driver button:hover { background: #444; }
+  .driver .seg button.on { background: #ffe14d; color: #111; border-color: #ffe14d; }
+  .driver input { font: inherit; font-size: 12px; width: 100%; padding: 4px 6px; border-radius: 4px; border: 1px solid #444; background: #111; color: #eee; margin: 2px 0; }
+  .driver .grp { margin: 6px 0 2px; color: #aaa; font-size: 11px; }
+  pre.state { font-size: 11px; background: #111; padding: 8px; border-radius: 4px; white-space: pre-wrap; color: #9fe; }
+
+  /* ---------- popup mock ---------- */
+  .popup { width: 320px; background: var(--panel); border: 1px solid var(--line); color: var(--tx-2); border-radius: var(--r-panel); padding: 6px; font: 400 13px/19.5px var(--sans); box-shadow: var(--shadow-pop); }
+  .popup .hd { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px 10px; gap: 8px; }
+  .popup .hd .dot { margin-top: 0; }
+  .popup .sec { border-top: 1px solid var(--line); padding: 6px 4px; display: grid; gap: 2px; }
+  .popup .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px; border-radius: 8px; min-height: 36px; min-width: 0; }
+  .popup .stack { display: grid; gap: 6px; padding: 6px; justify-items: start; }
+  .popup .who { display: flex; gap: 10px; align-items: center; padding: 6px; min-width: 0; }
+  .popup .who .nm { max-width: 220px; }
+  .popup .ell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .popup .muted { color: var(--tx-3); font-size: 12px; }
+  .popup .faint { color: var(--tx-3); font-size: 12px; padding: 0 6px 6px; }
+  .popup input { font: inherit; color: var(--tx-1); background: transparent; border: 1px solid var(--line-strong); border-radius: 8px; padding: 3px 8px; width: 150px; }
+  .popup input:focus { outline: none; box-shadow: 0 0 0 1px var(--accent); }
+  .popup .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .popup .danger { color: var(--bad); }
+
+  /* ---------- prototype switcher (not part of the design) ---------- */
+  .switcher { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); background: #ffe14d; color: #111; border-radius: 99px; padding: 6px 10px; display: flex; gap: 10px; align-items: center; box-shadow: 0 4px 18px #000a; z-index: 100; font-weight: 700; }
+  .switcher button { border: 0; background: #0002; border-radius: 50%; width: 28px; height: 28px; cursor: pointer; font-size: 15px; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div>
+    <div id="stage">
+      <div class="nf-top"><span class="nf-btn">←</span><span style="font-size:13px;color:#ccc">mock Netflix player — move the mouse to show controls; idle 3s hides them</span></div>
+      <div class="nf-time">41:12 / 1:48:30</div>
+      <div class="nf-bottom">
+        <div class="nf-scrub"><i></i><b></b></div>
+        <div class="nf-row" id="nfRow">
+          <span class="nf-btn" id="nfPlay">⏸</span><span class="nf-btn">↺</span><span class="nf-btn">↻</span><span class="nf-btn">🔊</span>
+          <span class="title" id="nfTitle"></span>
+          <span class="nf-btn">⏭</span><span class="nf-btn">☰</span><span class="nf-btn">💬</span><span class="nf-btn">⚡</span>
+          <span id="nfSlot"></span>
+          <span class="nf-btn" id="nfFull">⛶</span>
+        </div>
+      </div>
+      <div id="ens" role="region" aria-label="Ensemble notifications"></div>
+      <div class="sr" id="livePolite" aria-live="polite" role="status"></div>
+      <div class="sr" id="liveAssertive" aria-live="assertive" role="alert"></div>
+    </div>
+    <h2>Extension popup (toolbar icon)</h2>
+    <div id="popup"></div>
+  </div>
+
+  <div class="driver">
+    <h2 style="margin-top:0">Viewing as</h2>
+    <div class="seg" id="segMe"></div>
+    <h2>UI language</h2>
+    <div class="seg" id="segLang"></div>
+    <h2>Fire a Notice</h2>
+    <div id="buttons"></div>
+    <h2>Stress data (break-ui)</h2>
+    <div class="grp">Other Partner's name</div><input id="inName" maxlength="40">
+    <div class="grp">Netflix title</div><input id="inTitle">
+    <div id="stress"></div>
+    <h2>Engine state (what the UI is rendering)</h2>
+    <pre class="state" id="state"></pre>
+  </div>
+</div>
+
+<div class="switcher"><button id="prev">←</button><span id="vlabel"></span><button id="next">→</button></div>
+
+<script>
+const VARIANTS = { A: 'Corner pill + toasts', B: 'Inside Netflix control bar', C: 'Edge rail + log' };
+const params = new URLSearchParams(location.search);
+let variant = VARIANTS[params.get('variant')] ? params.get('variant') : 'B';
+
+// Partners: placeholder names. Each side reads its own UI language. Names are remote, untrusted input.
+const PEOPLE = { seb: { name: 'Sebastian', lang: 'en' }, her: { name: 'Ana', lang: 'es' } };
+let me = 'seb';
+let lang = 'en';
+let title = 'Mock Series';
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const clean = s => String(s ?? '').trim().replace(/\s+/g, ' ');
+const otherName = () => clean(PEOPLE[me === 'seb' ? 'her' : 'seb'].name) || (lang === 'es' ? 'La otra persona' : 'Your Partner');
+const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const initial = n => { const s = clean(n); if (!s) return '?'; return [...seg.segment(s)][0].segment.toLocaleUpperCase(); };
+const other = () => `<bdi class="nm" title="${esc(otherName())}">${esc(otherName())}</bdi>`;
+const ttl = () => `<bdi class="ttl">${esc(title)}</bdi>`;
+const tc = s => `<span class="tc">${esc(s)}</span>`;
+
+const I = { // 16px stroke icons
+  sync: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M13 6.5A5 5 0 0 0 4 4.2L2.5 5.5M3 9.5A5 5 0 0 0 12 11.8l1.5-1.3"/><path d="M2.5 2.5v3h3M13.5 13.5v-3h-3"/></svg>',
+  plus: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>',
+  more: '<svg viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="12.5" cy="8" r="1.2"/></svg>',
+  play: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.5v9l7.5-4.5z"/></svg>',
+  x: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg>',
+};
+
+const T = {
+  en: {
+    watching: n => `Watching with ${n}`, resync: 'Resync', leave: 'Leave', wt: 'Watch together', play: 'Play', moreN: n => `+${n} more`,
+    paused: (n, t) => `${n} paused at ${tc(t)}`, played: (n, t) => `${n} played from ${tc(t)}`, seeked: (n, t) => `${n} jumped to ${tc(t)}`,
+    skipped: n => `${n} skipped the intro`, resyncing: 'Resyncing…', resynced: n => `Back in sync with ${n}`,
+    waiting: n => `Waiting for ${n}…`, waitSub: 'Press play to keep watching on your own',
+    dropped: n => `${n} dropped — reconnecting…`, nextEp: n => `Waiting for ${n} to load the next episode…`,
+    ready: 'Ready', readySub: 'Either of you presses play to start together',
+    invite: (n, t) => `${n} wants to watch ${t} together`, join: 'Join', notNow: 'Not now',
+    declined: n => `${n} said not now`, offline: n => `${n} isn't online — link copied, send it to them`,
+    inviteSent: n => `Invite sent to ${n}`, left: n => `${n} left the Watch Session`,
+    unavailTitle: "This title isn't available in your region", unavailEp: "This episode isn't available in your region", aloneNow: "You're watching on your own now",
+    length: 'Your versions of this episode differ in length — sync may slip',
+    paired: n => `${n} paired with you`, linkUsed: 'This pairing link was already used — ask for a new one', unpaired: n => `${n} unpaired`,
+    replace: n => `Replace your pairing with ${n}?`, replaceBtn: 'Replace', keep: 'Keep current',
+    notWatching: n => `${n} isn't watching this right now`, linkCopied: 'Pairing link copied — send it to the person you want to watch with',
+    reconnecting: 'Reconnecting…', relay: "Can't reach Ensemble — still trying", offlineMe: "You're offline",
+    update: 'Update Ensemble', updateNow: 'Update now', pairInvalid: 'This browser is no longer paired — pair again',
+    partnerUpdate: n => `${n} needs to update Ensemble before you can watch together`, youUpdate: n => `Update Ensemble to watch with ${n}`,
+    cantControl: "Ensemble can't control this player", cantControlSub: 'Netflix may have changed. Keep watching on your own.',
+    partnerCantControl: n => `Ensemble can't control ${n}'s player — the Watch Session ended`,
+    stuck: 'Your player is stuck', stuckSub: 'Reload to rejoin — the movie keeps its place', reload: 'Reload',
+    netflixErr: (n, c) => `Waiting for ${n} — Netflix error ${c} on their side`,
+    extUpdated: 'Ensemble was updated', extUpdatedSub: 'Reload this tab to keep watching together',
+    slow: 'Your connection is slow — sync may slip',
+    otherTab: 'Ensemble is active in another tab', useHere: 'Use here',
+    connected: 'Connected', presenceIn: 'In the Watch Session', presenceAlone: t => `Watching ${t} alone`,
+    yourName: 'Your name', unpair: 'Unpair', notPaired: 'Open a title on Netflix and click Watch together to pair.',
+    sendDiag: n => `Send diagnostics to ${n}`, notConn: 'Not connected — use Save instead', sentTo: n => `Sent to ${n}`,
+    saveDiag: 'Save diagnostics', diagFrom: n => `Diagnostics from ${n}`, save: 'Save', dismiss: 'Dismiss', activity: 'Activity', noActivity: 'Nothing yet tonight',
+  },
+  es: {
+    watching: n => `Viendo con ${n}`, resync: 'Resincronizar', leave: 'Salir', wt: 'Ver juntos', play: 'Reproducir', moreN: n => `+${n} más`,
+    paused: (n, t) => `${n} pausó en ${tc(t)}`, played: (n, t) => `${n} reanudó en ${tc(t)}`, seeked: (n, t) => `${n} saltó a ${tc(t)}`,
+    skipped: n => `${n} saltó la intro`, resyncing: 'Resincronizando…', resynced: n => `Sincronizados de nuevo con ${n}`,
+    waiting: n => `Esperando a ${n}…`, waitSub: 'Presiona reproducir para seguir viendo por tu cuenta',
+    dropped: n => `${n} perdió la conexión — reconectando…`, nextEp: n => `Esperando a que ${n} cargue el siguiente episodio…`,
+    ready: 'Listo', readySub: 'Cualquiera de los dos presiona reproducir para empezar a la vez',
+    invite: (n, t) => `${n} quiere ver ${t} contigo`, join: 'Unirme', notNow: 'Ahora no',
+    declined: n => `${n} no puede ahora`, offline: n => `${n} no está en línea — enlace copiado, envíaselo`,
+    inviteSent: n => `Invitación enviada a ${n}`, left: n => `${n} salió de la sesión`,
+    unavailTitle: 'Este título no está disponible en tu región', unavailEp: 'Este episodio no está disponible en tu región', aloneNow: 'Ahora estás viendo por tu cuenta',
+    length: 'Las versiones de este episodio duran distinto — la sincronización puede desfasarse',
+    paired: n => `${n} se vinculó contigo`, linkUsed: 'Este enlace de vinculación ya se usó — pide uno nuevo', unpaired: n => `${n} deshizo la vinculación`,
+    replace: n => `¿Reemplazar tu vinculación por ${n}?`, replaceBtn: 'Reemplazar', keep: 'Mantener la actual',
+    notWatching: n => `${n} no está viendo esto ahora`, linkCopied: 'Enlace de vinculación copiado — envíaselo a la persona con quien quieres ver',
+    reconnecting: 'Reconectando…', relay: 'No se puede conectar con Ensemble — reintentando', offlineMe: 'Sin conexión a internet',
+    update: 'Actualiza Ensemble', updateNow: 'Actualizar ahora', pairInvalid: 'Este navegador ya no está vinculado — vuelve a vincularlo',
+    partnerUpdate: n => `${n} tiene que actualizar Ensemble para que puedan ver juntos`, youUpdate: n => `Actualiza Ensemble para ver con ${n}`,
+    cantControl: 'Ensemble no puede controlar este reproductor', cantControlSub: 'Puede que Netflix haya cambiado. Sigue viendo por tu cuenta.',
+    partnerCantControl: n => `Ensemble no puede controlar el reproductor de ${n} — la sesión terminó`,
+    stuck: 'Tu reproductor se atascó', stuckSub: 'Recarga para volver — la película no pierde su sitio', reload: 'Recargar',
+    netflixErr: (n, c) => `Esperando a ${n} — error de Netflix ${c} en su lado`,
+    extUpdated: 'Ensemble se actualizó', extUpdatedSub: 'Recarga esta pestaña para seguir viendo juntos',
+    slow: 'Tu conexión es lenta — la sincronización puede desfasarse',
+    otherTab: 'Ensemble está activo en otra pestaña', useHere: 'Usar aquí',
+    connected: 'Conectado', presenceIn: 'En la sesión', presenceAlone: t => `Viendo ${t} por su cuenta`,
+    yourName: 'Tu nombre', unpair: 'Desvincular', notPaired: 'Abre un título en Netflix y presiona Ver juntos para vincular.',
+    sendDiag: n => `Enviar diagnóstico a ${n}`, notConn: 'Sin conexión — usa Guardar', sentTo: n => `Enviado a ${n}`,
+    saveDiag: 'Guardar diagnóstico', diagFrom: n => `Diagnóstico de ${n}`, save: 'Guardar', dismiss: 'Cerrar', activity: 'Actividad', noActivity: 'Nada todavía esta noche',
+  },
+};
+const t = (k, ...a) => { const v = T[lang][k]; return typeof v === 'function' ? v(...a) : v; };
+
+// ---- Notice classes, shared by all variants:
+//  toast  — transient fact (ttl ms). `slot` = Sonner-style stable id: a new toast in the same slot UPDATES it in place.
+//  wait   — a system wait: persistent, cleared by the engine or by pressing play
+//  ask    — needs an answer (buttons); persistent until answered
+//  alert  — persistent problem. `blocking` alerts take the centre card / modal; the rest stack with toasts.
+const N = {
+  paused:        { cls: 'toast', ttl: 2000, who: true, slot: 'cmd', text: () => t('paused', other(), '41:12') },
+  played:        { cls: 'toast', ttl: 2000, who: true, slot: 'cmd', text: () => t('played', other(), '41:12') },
+  seeked:        { cls: 'toast', ttl: 2000, who: true, slot: 'cmd', text: () => t('seeked', other(), '1:02:40') },
+  skipped:       { cls: 'toast', ttl: 2000, who: true, slot: 'cmd', text: () => t('skipped', other()) },
+  resyncing:     { cls: 'toast', ttl: 8000, slot: 'resync', text: () => t('resyncing') },
+  resynced:      { cls: 'toast', ttl: 2000, slot: 'resync', sev: 'ok', text: () => t('resynced', other()) },
+  inviteSent:    { cls: 'toast', ttl: 3000, slot: 'invite', text: () => t('inviteSent', other()) },
+  declined:      { cls: 'toast', ttl: 3000, who: true, slot: 'invite', text: () => t('declined', other()) },
+  offline:       { cls: 'toast', ttl: 5000, slot: 'invite', text: () => t('offline', other()), sev: 'warn' },
+  left:          { cls: 'toast', ttl: 4000, who: true, text: () => t('left', other()) },
+  paired:        { cls: 'toast', ttl: 4000, who: true, text: () => t('paired', other()) },
+  unpaired:      { cls: 'toast', ttl: 5000, text: () => t('unpaired', other()), sev: 'warn' },
+  linkCopied:    { cls: 'toast', ttl: 4000, text: () => t('linkCopied') },
+  length:        { cls: 'toast', ttl: 5000, text: () => t('length'), sev: 'warn' },
+  slow:          { cls: 'toast', ttl: 5000, text: () => t('slow'), sev: 'warn' },
+
+  waiting:       { cls: 'wait', text: () => t('waiting', other()), sub: () => t('waitSub') },
+  nextEp:        { cls: 'wait', text: () => t('nextEp', other()), sub: () => t('waitSub') },
+  dropped:       { cls: 'wait', text: () => t('dropped', other()), sub: () => t('waitSub'), sev: 'warn' },
+  netflixErr:    { cls: 'wait', text: () => t('netflixErr', other(), tc('NW-2-5')), sub: () => t('waitSub'), sev: 'warn' },
+  ready:         { cls: 'wait', text: () => t('ready'), sub: () => t('readySub'), sev: 'ok' },
+
+  invite:        { cls: 'ask', who: true, text: () => t('invite', other(), ttl()), acts: ['join', 'notNow'] },
+  replace:       { cls: 'ask', text: () => t('replace', other()), acts: ['replaceBtn', 'keep'] },
+  notWatching:   { cls: 'ask', who: true, text: () => t('notWatching', other()), acts: ['wt', 'dismiss'] },
+  otherTab:      { cls: 'ask', text: () => t('otherTab'), acts: ['useHere', 'dismiss'] },
+
+  unavailTitle:  { cls: 'alert', blocking: true, text: () => t('unavailTitle'), sub: () => t('aloneNow'), sev: 'bad', acts: ['dismiss'] },
+  unavailEp:     { cls: 'alert', blocking: true, text: () => t('unavailEp'), sub: () => t('aloneNow'), sev: 'bad', acts: ['dismiss'] },
+  stuck:         { cls: 'alert', blocking: true, text: () => t('stuck'), sub: () => t('stuckSub'), sev: 'bad', acts: ['reload'] },
+  extUpdated:    { cls: 'alert', blocking: true, text: () => t('extUpdated'), sub: () => t('extUpdatedSub'), sev: 'warn', acts: ['reload'] },
+  cantControl:   { cls: 'alert', blocking: true, text: () => t('cantControl'), sub: () => t('cantControlSub'), sev: 'bad', acts: ['dismiss'] },
+  linkUsed:      { cls: 'alert', text: () => t('linkUsed'), sev: 'bad', acts: ['dismiss'] },
+  partnerCantControl: { cls: 'alert', text: () => t('partnerCantControl', other()), sev: 'bad', acts: ['dismiss'] },
+  pairInvalid:   { cls: 'alert', text: () => t('pairInvalid'), sev: 'bad', acts: ['dismiss'] },
+  partnerUpdate: { cls: 'alert', text: () => t('partnerUpdate', other()), sev: 'warn', acts: ['dismiss'] },
+  youUpdate:     { cls: 'alert', text: () => t('youUpdate', other()), sev: 'warn', acts: ['updateNow'] },
+};
+const GROUPS = {
+  'Playback Commands (one updating toast per Partner)': ['paused', 'played', 'seeked', 'skipped'],
+  'Session & pairing (toast)': ['inviteSent', 'declined', 'offline', 'left', 'paired', 'unpaired', 'linkCopied', 'length', 'slow'],
+  'System waits': ['waiting', 'nextEp', 'dropped', 'netflixErr', 'ready'],
+  'Needs an answer': ['invite', 'replace', 'notWatching', 'otherTab'],
+  'Blocking problems (centre)': ['unavailTitle', 'unavailEp', 'stuck', 'extUpdated', 'cantControl'],
+  'Other problems (stacked)': ['linkUsed', 'partnerCantControl', 'pairInvalid', 'partnerUpdate', 'youUpdate'],
+};
+
+// ---- in-memory state
+const S = {
+  toasts: [],            // {id, key, left} — id is the slot ('cmd:<partner>') or a unique id; `left` = ms remaining
+  wait: null, asks: [], alerts: [],
+  conn: 'connected', inSession: true, paired: true, playing: true,
+  menuOpen: false, log: [], diagSent: false, diagFrom: false,
+  shown: new Set(),      // toast ids actually on screen right now (for the state readout)
+  hover: false,          // pointer resting on a Notice: all toast timers pause
+};
+let seq = 0;
+let instantExit = false; // keyboard-initiated changes don't animate (emil)
+
+function announce(key) {
+  const n = N[key], el = document.createElement('div'); el.innerHTML = n.text() + (n.sub ? '. ' + n.sub() : '');
+  const region = (n.cls === 'ask' || n.blocking) ? liveAssertive : livePolite;
+  region.textContent = ''; requestAnimationFrame(() => { region.textContent = el.textContent; });
+}
+function fire(key) {
+  const n = N[key];
+  S.log.unshift({ key, at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), html: n.text() }); S.log = S.log.slice(0, 20);
+  if (n.cls === 'toast') {
+    const id = n.slot ? `${n.slot}:${me === 'seb' ? 'her' : 'seb'}` : `t${++seq}`;
+    const existing = S.toasts.find(x => x.id === id);
+    if (existing) { existing.key = key; existing.left = n.ttl; } else S.toasts.push({ id, key, left: n.ttl });   // update restarts the timer
+  }
+  if (n.cls === 'wait') { S.wait = key; S.playing = false; }
+  if (n.cls === 'ask' && !S.asks.includes(key)) S.asks.push(key);
+  if (n.cls === 'alert' && !S.alerts.includes(key)) S.alerts.push(key);
+  if (['unavailTitle', 'unavailEp', 'partnerCantControl', 'left', 'cantControl'].includes(key)) { S.inSession = false; S.wait = null; }
+  if (['unpaired', 'pairInvalid'].includes(key)) { S.paired = false; S.inSession = false; S.wait = null; }
+  if (key === 'paired') S.paired = true;
+  announce(key);
+  render();
+}
+function act(key, a) {
+  S.asks = S.asks.filter(k => k !== key); S.alerts = S.alerts.filter(k => k !== key);
+  if (key === 'invite' && a === 'join') { S.inSession = true; fire('ready'); return; }
+  if (key === 'notWatching' && a === 'wt') { fire('inviteSent'); return; }
+  render();
+}
+function pressPlay(fromKey) { // a Partner's Playback Command beats any system wait (R8)
+  S.playing = !S.playing; if (S.wait) { S.wait = null; S.playing = true; }
+  instantExit = !!fromKey; render(); instantExit = false;
+}
+function resync() { // a scheduled start: a "promise" toast in one slot, resolved by the engine (with a timeout so it can't hang)
+  S.menuOpen = false; fire('resyncing');
+  setTimeout(() => fire('resynced'), 1200);
+}
+// Toast timers run in real time. They pause only while the tab is hidden (emil: Sonner principles) or while
+// the pointer rests on a Notice (so it can be read or clicked). A toast that never got on screen — queued
+// behind a wait or past the stack limit — still expires: Playback toasts describe "now", and showing them
+// late is worse than not at all (they're in B's activity log either way).
+setInterval(() => {
+  if (document.visibilityState !== 'visible' || S.hover) return;
+  let changed = false;
+  for (const x of S.toasts) { x.left -= 250; if (x.left <= 0) changed = true; }
+  if (changed) { S.toasts = S.toasts.filter(x => x.left > 0); render(); }
+}, 250);
+document.addEventListener('mouseover', e => { const h = !!e.target.closest('.A-toast, .C-item, .B-line'); if (h !== S.hover) { S.hover = h; } });
+
+// ---- helpers
+const PRIMARY = ['join', 'replaceBtn', 'wt', 'useHere', 'reload', 'updateNow'];
+const btns = (key, acts) => (acts || []).map(a => `<button class="btn ${PRIMARY.includes(a) ? 'inv' : 'ghost'}" data-act="${a}" data-key="${key}">${t(a)}</button>`).join('');
+const playBtn = () => `<button class="btn inv" data-ui="play" style="display:inline-flex;gap:6px;align-items:center"><span style="width:14px;height:14px;display:inline-grid">${I.play}</span>${t('play')}</button>`;
+const av = (extra = '') => `<span class="av ${extra}" aria-hidden="true">${esc(initial(otherName()))}</span>`;
+const lead = n => n.who ? av() : `<span class="dot ${n.sev || (n.cls === 'ask' ? 'ask' : n.cls === 'toast' ? 'off' : 'warn')}"></span>`;
+const connSev = () => ({ connected: '', reconnecting: 'warn', relay: 'bad', offlineMe: 'bad', update: 'bad' })[S.conn];
+const connText = () => ({ connected: S.inSession ? t('watching', other()) : t('connected'), reconnecting: t('reconnecting'), relay: t('relay'), offlineMe: t('offlineMe'), update: t('update') })[S.conn];
+const presence = () => S.inSession ? t('presenceIn') : t('presenceAlone', ttl());
+const narrow = () => document.getElementById('stage').clientWidth < 720;
+const cap = () => narrow() ? 2 : 3;   // Sonner's visibleToasts default is 3; fewer on a small player
+const blockingAlert = () => S.alerts.find(k => N[k].blocking);
+const stackAlerts = () => S.alerts.filter(k => !N[k].blocking);
+const exitAttr = dir => `data-exit="${dir}"`;
+
+// ===================== Variant A =====================
+// A quiet glass pill in the corner; Partner actions as small toasts; waits and blocking problems as one centre card.
+function renderA() {
+  const ask = S.asks[0];
+  const pill = ask ? '' : `<div class="ens A-pill glass" data-k="pill" ${exitAttr('fade')}>
+      <span class="mark"><i></i></span><span class="dot ${connSev()}"></span><span>${connText()}</span>
+      <span class="sep"></span>
+      ${S.inSession ? `<button class="ibtn" data-ui="resync" title="${t('resync')}" aria-label="${t('resync')}">${I.sync}</button>` : `<button class="btn inv" data-act="wt">${t('wt')}</button>`}
+      <button class="ibtn" data-ui="menu" aria-label="More">${I.more}</button>
+    </div>`;
+  const menu = S.menuOpen && !ask ? `<div class="ens A-menu glass" data-k="menu" ${exitAttr('fade')}>
+      <div class="item"><span class="label">${esc(otherName())}</span><span class="label">${presence()}</span></div>
+      ${S.inSession ? `<div class="item click" data-ui="resync"><span>${t('resync')}</span><span style="color:var(--tx-3)">${I.sync}</span></div><div class="item click" data-ui="leave"><span>${t('leave')}</span></div>` : ''}
+    </div>` : '';
+  // stack: problems first, then toasts newest at bottom; capped, overflow collapses into "+N more"
+  // persistent problems win the visible slots; toasts fill what's left, newest kept
+  const al = stackAlerts().map(k => ({ id: 'al:' + k, k, alert: true })).slice(0, cap());
+  const room = cap() - al.length;
+  const visible = [...al, ...(room > 0 ? S.toasts.slice(-room) : []).map(x => ({ id: x.id, k: x.key }))];
+  const hidden = stackAlerts().length + S.toasts.length - visible.length;
+  S.shown = new Set(visible.filter(v => !v.alert).map(v => v.id));
+  const stack = `<div class="ens pass A-toasts" data-k="stack">
+      ${hidden > 0 ? `<span class="more" data-k="more">${t('moreN', hidden)}</span>` : ''}
+      ${visible.map(v => v.alert
+        ? `<div class="A-toast chip wide" data-k="${v.id}" ${exitAttr('down')}>${lead(N[v.k])}<span class="txt">${N[v.k].text()}</span><span class="acts">${btns(v.k, N[v.k].acts)}</span></div>`
+        : `<div class="A-toast chip" data-k="${v.id}" ${exitAttr('down')}>${lead(N[v.k])}<span class="txt">${N[v.k].text()}</span></div>`).join('')}
+    </div>`;
+  const big = blockingAlert();
+  let card = '';
+  if (big) card = `<div class="ens A-card glass" data-k="card:${big}" ${exitAttr('scale')} role="alertdialog"><div class="head"><span class="dot ${N[big].sev}"></span><span class="big">${N[big].text()}</span></div><div class="sub">${N[big].sub()}</div><div class="acts">${btns(big, N[big].acts)}</div></div>`;
+  else if (S.wait) card = `<div class="ens A-card glass" data-k="card:${S.wait}" ${exitAttr('scale')}><div class="head"><span class="dot ${N[S.wait].sev || 'warn'}"></span><span class="big">${N[S.wait].text()}</span></div><div class="sub">${N[S.wait].sub()}</div><div class="acts">${playBtn()}</div></div>`;
+  const banner = ask ? `<div class="ens A-banner glass" data-k="ask:${ask}" ${exitAttr('up')}>${N[ask].who ? av('ring') : '<span class="dot ask" style="margin:0 0 0 6px"></span>'}<span class="txt">${N[ask].text()}</span><span class="acts">${btns(ask, N[ask].acts)}</span>${S.asks.length > 1 ? `<span class="more" style="align-self:center">+${S.asks.length - 1}</span>` : ''}</div>` : '';
+  return pill + menu + stack + card + banner;
+}
+
+// ===================== Variant B =====================
+// Ensemble is a button in Netflix's own control bar. Only one caption line at a time,
+// priority: ask > alert > toast (waits dim the picture instead). Everything also goes to the panel's activity log.
+function renderB() {
+  const top = S.asks[0] ? ['ask', S.asks[0], 'ask'] : S.alerts[0] ? ['alert', S.alerts[0], 'al'] : S.toasts.length ? ['toast', S.toasts[S.toasts.length - 1].key, S.toasts[S.toasts.length - 1].id] : null;
+  const queued = S.asks.length + S.alerts.length + S.toasts.length - (top ? 1 : 0);
+  const lineUp = top && !S.menuOpen && !S.wait;
+  S.shown = new Set(lineUp && top[0] === 'toast' ? [top[2]] : []);   // queued toasts don't run down while nobody can see them
+  let line = '';
+  if (lineUp) {
+    const [cls, k] = top, n = N[k];
+    line = `<div class="ens B-line chip ${cls}" data-k="line:${k}" ${exitAttr('fade')}>${lead(n)}<span class="txt">${n.text()}${n.sub && cls === 'alert' ? ` <span style="color:var(--tx-2)">— ${n.sub()}</span>` : ''}</span>${n.acts ? `<span class="acts">${btns(k, n.acts)}</span>` : ''}${queued > 0 ? `<span class="more" style="align-self:center">+${queued}</span>` : ''}</div>`;
+  }
+  const dim = S.wait ? `<div class="ens pass B-dim" data-k="dim:${S.wait}" ${exitAttr('fade')}><div class="msg"><div class="big">${N[S.wait].text()}</div><small>${N[S.wait].sub()}</small><div style="margin-top:14px">${playBtn()}</div></div></div>` : '';
+  const panel = S.menuOpen ? `<div class="ens B-panel glass" data-k="panel" ${exitAttr('fade')}>
+      <div class="row" style="justify-content:space-between"><span class="mark"><i></i>Ensemble</span><button class="ibtn" data-ui="menu" aria-label="Close">${I.x}</button></div>
+      <div class="row">${av()}<div style="min-width:0"><div style="color:var(--tx-1)">${connText()}</div><div class="label">${presence()}</div></div></div>
+      ${S.inSession ? `<div class="row"><button class="btn inv" data-ui="resync">${t('resync')}</button><button class="btn ghost" data-ui="leave">${t('leave')}</button></div>` : `<div class="row"><button class="btn inv" data-act="wt">${t('wt')}</button></div>`}
+      <div><span class="label">${t('activity')}</span><div class="log">${S.log.map(l => `<div><span class="stamp">${l.at}</span>${l.html}</div>`).join('') || `<div style="color:var(--tx-3)">${t('noActivity')}</div>`}</div></div>
+    </div>` : '';
+  return dim + line + panel;
+}
+function renderBSlot() {
+  const sev = S.asks.length ? 'var(--accent)' : S.alerts.length ? 'var(--bad)' : S.conn !== 'connected' ? 'var(--warn)' : S.inSession ? 'var(--ok)' : '';
+  return `<span class="B-trigger" data-ui="menu" title="Ensemble" role="button" aria-label="Ensemble"><span class="mark"><i></i></span>${sev ? `<span class="B-badge" style="background:${sev}"></span>` : ''}</span>`;
+}
+
+// ===================== Variant C =====================
+// A thin rail on the right edge, faint but never fully hidden. Notices are items sliding out of the rail;
+// waits and blocking problems dim the picture, but Netflix's own controls stay clickable.
+function renderC() {
+  const st = { connected: 'var(--ok)', reconnecting: 'var(--warn)', relay: 'var(--bad)', offlineMe: 'var(--bad)', update: 'var(--bad)' }[S.conn];
+  const rail = `<div class="ens C-rail" data-k="rail">
+      <div class="C-avatar" data-ui="menu" title="${esc(otherName())}" role="button" aria-label="${esc(otherName())}">${esc(initial(otherName()))}<span class="st" style="background:${S.inSession ? st : 'var(--tx-4)'}"></span></div>
+      ${S.inSession ? `<button class="ibtn" data-ui="resync" title="${t('resync')}" aria-label="${t('resync')}">${I.sync}</button>` : `<button class="ibtn" data-act="wt" title="${t('wt')}" aria-label="${t('wt')}">${I.plus}</button>`}
+    </div>`;
+  const item = (id, n, k, extra = '') => `<div class="C-item glass ${extra}" data-k="${id}" ${exitAttr('right')}><div class="line">${lead(n)}<span class="txt">${n.text()}</span></div>${n.acts ? `<div class="acts">${btns(k, n.acts)}</div>` : ''}</div>`;
+  const all = [
+    ...S.asks.map(k => ({ id: 'ask:' + k, k })),
+    ...stackAlerts().map(k => ({ id: 'al:' + k, k })),
+    ...S.toasts.slice().reverse().map(x => ({ id: x.id, k: x.key, toast: true })),
+  ];
+  const visible = all.slice(0, cap()), hidden = all.length - visible.length;
+  S.shown = new Set(visible.filter(v => v.toast).map(v => v.id));
+  const items = visible.map((v, i) => item(v.id, v.toast ? { ...N[v.k], acts: null } : N[v.k], v.k, v.toast && i > 0 ? 'old' : '')).join('')
+    + (hidden > 0 ? `<span class="more" data-k="more">${t('moreN', hidden)}</span>` : '');
+  const fly = `<div class="ens C-fly glass" data-k="fly" ${exitAttr('fade')}><div style="display:flex;gap:8px;align-items:center;min-width:0"><span class="dot ${connSev()}"></span><span style="color:var(--tx-1)">${connText()}</span></div>
+      <div class="label">${esc(otherName())} · ${presence()}</div>
+      ${S.inSession ? `<div class="acts"><button class="btn tag" data-ui="resync">${t('resync')}</button><button class="btn ghost" data-ui="leave">${t('leave')}</button></div>` : ''}</div>`;
+  const big = blockingAlert();
+  let modal = '';
+  if (big) modal = `<div class="ens pass C-modal scrim" data-k="modal:${big}" ${exitAttr('fade')} role="alertdialog"><div class="box"><span class="dot ${N[big].sev}"></span><div class="big">${N[big].text()}</div><div class="sub">${N[big].sub()}</div><div class="acts">${btns(big, N[big].acts)}</div></div></div>`;
+  else if (S.wait) modal = `<div class="ens pass C-modal scrim" data-k="modal:${S.wait}" ${exitAttr('fade')}><div class="box"><span class="dot ${N[S.wait].sev || 'warn'}"></span><div class="big">${N[S.wait].text()}</div><div class="sub">${N[S.wait].sub()}</div>${playBtn()}</div></div>`;
+  if (modal) S.shown = new Set();   // while the picture is dimmed the log stays tucked into the rail (only the modal speaks)
+  return modal + rail + (S.menuOpen ? fly : modal ? '' : `<div class="ens pass C-log" data-k="log">${items}</div>`);
+}
+
+// ===================== popup (same for all variants) =====================
+function renderPopup() {
+  const hd = `<div class="hd"><span class="mark"><i></i>Ensemble</span>${S.paired ? `<span style="display:flex;gap:6px;align-items:center;min-width:0" class="muted"><span class="dot ${connSev()}"></span><span class="ell">${connText()}</span></span>` : ''}</div>`;
+  if (!S.paired) return `<div class="popup">${hd}<div class="sec"><div class="row muted">${t('notPaired')}</div></div><div class="sec"><div class="stack"><button class="btn ghost">${t('saveDiag')}</button></div></div></div>`;
+  const connected = S.conn === 'connected';
+  return `<div class="popup">${hd}
+    <div class="sec">
+      <div class="who">${av()}<div style="min-width:0"><div>${other()}</div><div class="muted ell">${presence()}</div></div></div>
+      ${S.inSession ? `<div class="row"><span class="ell">${ttl()} · E3</span><button class="btn tag" data-ui="leave">${t('leave')}</button></div>` : ''}
+    </div>
+    <div class="sec"><div class="row"><span class="muted">${t('yourName')}</span><input id="myName" value="${esc(PEOPLE[me].name)}" maxlength="40" dir="auto"></div></div>
+    <div class="sec"><div class="stack">
+      ${S.diagSent ? `<span class="muted">${t('sentTo', other())}</span>` : `<button class="btn tag" data-ui="diag" ${connected ? '' : 'disabled'}>${t('sendDiag', other())}</button>`}
+      ${!connected ? `<span class="faint" style="padding:0">${t('notConn')}</span>` : ''}
+      <button class="btn ghost">${t('saveDiag')}</button>
+      ${S.diagFrom ? `<div class="row" style="padding:0;width:100%"><span class="ell">${t('diagFrom', other())}</span><button class="btn inv">${t('save')}</button></div>` : ''}
+    </div></div>
+    <div class="sec"><div class="row"><span></span><button class="btn ghost danger">${t('unpair')}</button></div></div>
+  </div>`;
+}
+
+// ===================== keyed DOM patching =====================
+// Surfaces and stack items carry data-k. Existing nodes are patched in place (their enter animation never replays);
+// new nodes are inserted (and animate in once); removed nodes animate out, then siblings slide into place (FLIP).
+// Exit = a "dissolve": motion + blur on a decelerating curve, opacity on its own accelerating curve.
+// (Round 3 used one 140ms ease-out for everything: ~70% of the fade happened in the first 35ms, which reads as a cut.)
+const EXIT = {
+  down:  [{ transform: 'none', filter: 'blur(0)' }, { transform: 'translateY(6px) scale(.96)', filter: 'blur(4px)' }],
+  up:    [{ transform: 'none', filter: 'blur(0)' }, { transform: 'translateY(-10px) scale(.97)', filter: 'blur(4px)' }],
+  right: [{ transform: 'none', filter: 'blur(0)' }, { transform: 'translateX(24px) scale(.97)', filter: 'blur(4px)' }],
+  scale: [{ transform: 'none', filter: 'blur(0)' }, { transform: 'scale(.96)', filter: 'blur(4px)' }],
+  fade:  null,
+};
+const EXIT_MS = { down: 260, up: 240, right: 260, scale: 220, fade: 240 };
+const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+function morph(parent, html) { const tpl = document.createElement('template'); tpl.innerHTML = html; syncKids(parent, tpl.content); }
+function syncKids(oldP, newP) {
+  const oldKids = [...oldP.children].filter(c => !c.dataset.leaving);
+  const byKey = new Map(oldKids.filter(c => c.dataset.k).map(c => [c.dataset.k, c]));
+  const used = new Set(), result = [];
+  for (const nk of [...newP.children]) {
+    const o = nk.dataset.k ? byKey.get(nk.dataset.k) : null;
+    if (o && o.tagName === nk.tagName) { patch(o, nk); used.add(o); result.push(o); }
+    else result.push(nk);
+  }
+  for (const o of oldKids) if (!used.has(o)) leave(o);
+  let prev = null;
+  for (const r of result) {
+    let want = prev ? prev.nextElementSibling : oldP.firstElementChild;
+    while (want && want.dataset.leaving) want = want.nextElementSibling;
+    if (r !== want) oldP.insertBefore(r, want);
+    prev = r;
+  }
+}
+function patch(o, n) {
+  for (const a of [...o.attributes]) if (!n.hasAttribute(a.name) && a.name !== 'data-leaving') o.removeAttribute(a.name);
+  for (const a of [...n.attributes]) if (o.getAttribute(a.name) !== a.value) o.setAttribute(a.name, a.value);
+  if (n.querySelector('[data-k]') || o.querySelector('[data-k]')) syncKids(o, n);   // keyed on either side → reconcile (so the last item still animates out)
+  else if (o.innerHTML !== n.innerHTML) o.innerHTML = n.innerHTML;   // text updated in place, no motion (data people read shouldn't move)
+}
+function leave(el) {
+  el.dataset.leaving = '1'; el.style.pointerEvents = 'none';
+  const parent = el.parentNode;
+  if (instantExit || !el.dataset.exit) { flip(parent, () => el.remove()); return; }
+  // In a stack, lift the leaving item out of the flow first, so its neighbours glide into the gap
+  // while it dissolves in place (instead of fade-then-jump).
+  if (parent && parent.matches('.A-toasts, .C-log')) flip(parent, 80, () => {   // 80ms head start: the leaver blurs before neighbours slide over it
+    const r = el.getBoundingClientRect(), pr = parent.getBoundingClientRect();
+    const anchorBottom = parent.matches('.A-toasts');   // A's stack grows upward from the bottom
+    // pin the size: once out of the flow, an emptied stack shrinks to 0 wide and `max-width: 100%` would squeeze the text to one word per line
+    Object.assign(el.style, { position: 'absolute', left: `${r.left - pr.left}px`, width: `${r.width}px`, maxWidth: 'none', height: `${r.height}px`, margin: 0,
+      ...(anchorBottom ? { bottom: `${pr.bottom - r.bottom}px` } : { top: `${r.top - pr.top}px` }) });
+  });
+  const kind = reduced() ? 'fade' : el.dataset.exit, ms = reduced() ? 200 : EXIT_MS[kind];
+  const anims = [el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: ms, easing: 'cubic-bezier(.4,0,.9,.6)', fill: 'forwards' })];
+  if (EXIT[kind]) anims.push(el.animate(EXIT[kind], { duration: ms, easing: 'cubic-bezier(.32,.72,0,1)', fill: 'forwards' }));
+  let done = false; const finish = () => { if (done) return; done = true; el.remove(); };
+  anims[0].finished.then(finish, finish);
+  setTimeout(finish, ms + 300);   // throttled/hidden tabs may never finish the animation
+}
+function flip(parent, delay, mutate) {   // siblings in a stack slide into their new place instead of jumping
+  if (typeof delay === 'function') { mutate = delay; delay = 0; }
+  if (!parent) return mutate();
+  const sibs = [...parent.children].filter(c => !c.dataset.leaving && c.dataset.k);
+  const before = new Map(sibs.map(s => [s, s.getBoundingClientRect().top]));
+  mutate();
+  if (reduced()) return;
+  for (const s of sibs) { const dy = before.get(s) - s.getBoundingClientRect().top; if (Math.abs(dy) > 0.5) s.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: 280, delay, fill: 'backwards', easing: 'cubic-bezier(.32,.72,0,1)' }); }
+}
+
+// ===================== wiring =====================
+function render() {
+  document.documentElement.lang = lang;
+  morph(document.getElementById('ens'), variant === 'A' ? renderA() : variant === 'B' ? renderB() : renderC());
+  document.getElementById('nfSlot').innerHTML = variant === 'B' ? renderBSlot() : '';
+  document.getElementById('nfPlay').textContent = S.playing ? '⏸' : '▶';
+  document.getElementById('nfTitle').innerHTML = `<b>${esc(title)}</b> &nbsp;E3 · "The Episode"`;
+  const pop = document.getElementById('popup'), focusedName = document.activeElement && document.activeElement.id === 'myName';
+  if (!focusedName) pop.innerHTML = renderPopup();
+  document.getElementById('vlabel').textContent = `${variant} (${VARIANTS[variant]})`;
+  document.getElementById('segMe').innerHTML = Object.entries(PEOPLE).map(([k, p]) => `<button data-me="${k}" class="${me === k ? 'on' : ''}">${esc(clean(p.name) || '—')} (${p.lang})</button>`).join('');
+  document.getElementById('segLang').innerHTML = ['en', 'es'].map(l => `<button data-lang="${l}" class="${lang === l ? 'on' : ''}">${l}</button>`).join('');
+  const st = { variant, me: PEOPLE[me].name, other: otherName(), lang, conn: S.conn, inSession: S.inSession, paired: S.paired, playing: S.playing, wait: S.wait, asks: S.asks, alerts: S.alerts, toasts: S.toasts.map(x => `${x.id}=${x.key} (${Math.max(0, x.left / 1000).toFixed(1)}s left${S.hover ? ', paused: hover' : S.shown.has(x.id) ? '' : ', not on screen'})`), fullscreen: !!document.fullscreenElement };
+  document.getElementById('state').textContent = JSON.stringify(st, null, 1);
+}
+const STRESS = {
+  'long name': { name: 'Aleksandra Wiśniewska-Kowalczyk' }, 'emoji name': { name: '🦊 Fox' }, 'one letter': { name: 'J' },
+  'lowercase': { name: 'dana' }, 'RTL name': { name: 'نور 2' }, 'HTML name': { name: '<img src=x onerror=alert(1)>Ana' }, 'empty name': { name: '   ' },
+  'Korean title': { title: '이상한 변호사 우영우' }, 'long title': { title: 'The Lord of the Rings: The Rings of Power — Season 2 Special Edition' },
+  'bright scene': { bright: true }, 'reset data': { name: 'Ana', title: 'Mock Series', bright: false },
+};
+function renderButtons() {
+  let h = '';
+  for (const [g, keys] of Object.entries(GROUPS)) h += `<div class="grp">${g}</div>` + keys.map(k => `<button data-fire="${k}">${k}</button>`).join('');
+  h += `<div class="grp">Connection status</div>` + ['connected', 'reconnecting', 'relay', 'offlineMe', 'update'].map(c => `<button data-conn="${c}">${c}</button>`).join('');
+  h += `<div class="grp">Popup</div><button data-ui="diagFrom">diagnostics arrive</button><button data-ui="reset">reset all</button>`;
+  h += `<div class="grp">Scenarios</div><button data-scn="night">movie night burst</button><button data-scn="storm">error storm</button><button data-scn="pile">everything at once</button>`;
+  document.getElementById('buttons').innerHTML = h;
+  document.getElementById('stress').innerHTML = Object.keys(STRESS).map(k => `<button data-stress="${k}">${k}</button>`).join('');
+  syncStressInputs();
+}
+function syncStressInputs() { inName.value = PEOPLE[me === 'seb' ? 'her' : 'seb'].name; inTitle.value = title; }
+const SCENARIOS = {
+  night: ['invite', 'paused', 'played', 'seeked', 'skipped', 'waiting', 'length'],
+  storm: ['dropped', 'slow', 'netflixErr', 'stuck', 'partnerUpdate', 'paused'],
+  pile: ['paused', 'length', 'slow', 'linkUsed', 'partnerUpdate', 'invite', 'replace', 'waiting'],
+};
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-fire],[data-act],[data-ui],[data-conn],[data-me],[data-lang],[data-scn],[data-stress]'); if (!el) return;
+  const d = el.dataset;
+  if (d.fire) fire(d.fire);
+  else if (d.act && d.key) act(d.key, d.act);
+  else if (d.act === 'wt') { fire(S.paired ? 'inviteSent' : 'linkCopied'); }
+  else if (d.conn) { S.conn = d.conn; if (d.conn === 'update') fire('youUpdate'); render(); }
+  else if (d.me) { me = d.me; lang = PEOPLE[me].lang; syncStressInputs(); render(); }
+  else if (d.lang) { lang = d.lang; render(); }
+  else if (d.scn) SCENARIOS[d.scn].forEach((k, i) => setTimeout(() => fire(k), i * (d.scn === 'pile' ? 120 : 700)));
+  else if (d.stress) { const s = STRESS[d.stress]; if ('name' in s) PEOPLE[me === 'seb' ? 'her' : 'seb'].name = s.name; if ('title' in s) title = s.title; if ('bright' in s) document.getElementById('stage').classList.toggle('bright', s.bright); syncStressInputs(); render(); }
+  else if (d.ui === 'menu') { S.menuOpen = !S.menuOpen; render(); }
+  else if (d.ui === 'play') pressPlay(false);
+  else if (d.ui === 'resync') resync();
+  else if (d.ui === 'leave') { S.inSession = false; S.wait = null; S.menuOpen = false; render(); }
+  else if (d.ui === 'diag') { S.diagSent = true; render(); }
+  else if (d.ui === 'diagFrom') { S.diagFrom = true; render(); }
+  else if (d.ui === 'reset') { Object.assign(S, { toasts: [], wait: null, asks: [], alerts: [], conn: 'connected', inSession: true, paired: true, playing: true, menuOpen: false, log: [], diagSent: false, diagFrom: false }); render(); }
+});
+document.addEventListener('input', e => {
+  if (e.target.id === 'inName') { PEOPLE[me === 'seb' ? 'her' : 'seb'].name = e.target.value; render(); }
+  if (e.target.id === 'inTitle') { title = e.target.value; render(); }
+  if (e.target.id === 'myName') { PEOPLE[me].name = e.target.value.slice(0, 40); render(); }
+});
+document.getElementById('nfPlay').onclick = () => pressPlay(false);
+document.getElementById('nfFull').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.getElementById('stage').requestFullscreen();
+document.addEventListener('fullscreenchange', render);
+
+// Netflix-like auto-hiding controls
+const stage = document.getElementById('stage'); let idleT;
+const wake = () => { stage.classList.remove('idle'); clearTimeout(idleT); idleT = setTimeout(() => stage.classList.add('idle'), 3000); };
+stage.addEventListener('mousemove', wake); wake();
+new ResizeObserver(() => render()).observe(stage);
+
+// variant switcher
+function setVariant(v) { variant = v; S.menuOpen = false; instantExit = true; const u = new URL(location); u.searchParams.set('variant', v); history.replaceState(null, '', u); render(); instantExit = false; }
+const keys = Object.keys(VARIANTS);
+const cycle = d => setVariant(keys[(keys.indexOf(variant) + d + keys.length) % keys.length]);
+document.getElementById('prev').onclick = () => cycle(-1);
+document.getElementById('next').onclick = () => cycle(1);
+document.addEventListener('keydown', e => { if (e.target.closest('input,textarea,[contenteditable]')) return; if (e.key === 'ArrowLeft') cycle(-1); if (e.key === 'ArrowRight') cycle(1); if (e.key === ' ') { e.preventDefault(); pressPlay(true); } });
+
+renderButtons(); render();
+</script>
+</body>
+</html>
