@@ -20,6 +20,10 @@ _Avoid_: Account, connection, room
 A Partner's request for the other Partner to join a Watch Session on a given title, delivered in Ensemble or as a link.
 _Avoid_: Party link, session request
 
+**Pairing link**:
+The one-time link a Partner sends to make the Pair; it stops working once the other Partner has used it. Not to be confused with an Invite sent as a link, which only works for the already-paired Partner.
+_Avoid_: Invite link, pairing code, join link
+
 **Leave**:
 A Partner deliberately ending the Watch Session (by the Leave control or by going back to browsing).
 _Avoid_: Quit, disconnect
